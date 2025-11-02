@@ -10,12 +10,12 @@ on:
       skip_cache:
         description: '跳过所有缓存，进行全新构建'
         required: false
-        default: false # 推荐将布尔值直接设为 false，而不是字符串 'false'
+        default: false
         type: boolean
       overwrite_existing:
         description: '如果镜像标签已存在，是否覆盖它'
         required: false
-        default: false # 推荐将布尔值直接设为 false
+        default: false
         type: boolean
 
 jobs:
@@ -25,7 +25,8 @@ jobs:
       contents: read
       packages: write
     
-    # 使用 outputs 将准备好的变量传递给后续步骤
+    # job 级别的 outputs 是给其他 job 使用的，我们在这里保留它没有问题，
+    # 只是在本 job 内部不能用 jobs.build-and-push.outputs 的方式引用它。
     outputs:
       image_tag: ${{ steps.prepare.outputs.IMAGE_TAG }}
       owner_lc: ${{ steps.prepare.outputs.OWNER_LC }}
@@ -36,11 +37,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. 优化：准备并验证所有需要的变量 (合并了原有的版本验证和仓库名转换)
+      # 2. 准备并验证所有需要的变量
       - name: Prepare and validate variables
         id: prepare
         run: |
-          # 验证版本号
           version="${{ github.event.inputs.version_to_build }}"
           if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "❌ 无效的版本格式: $version，期望格式为: v1.2.3"
@@ -49,7 +49,6 @@ jobs:
           echo "✅ 版本格式有效: $version"
           echo "IMAGE_TAG=$version" >> $GITHUB_OUTPUT
 
-          # 准备小写的仓库所有者名称
           OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "OWNER_LC=${OWNER_LC}" >> $GITHUB_OUTPUT
           echo "NPM_VERSION=${version#v}" >> $GITHUB_OUTPUT
@@ -62,15 +61,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 4. 优化：检查镜像是否已存在 (仅在不覆盖时运行)
+      # 4. 检查镜像是否已存在 (仅在不覆盖时运行)
       - name: Check if Docker image already exists
         id: check_image
-        # 仅当用户不希望覆盖时，才执行此检查
         if: "!github.event.inputs.overwrite_existing"
         run: |
           IMAGE_NAME="ghcr.io/${{ steps.prepare.outputs.OWNER_LC }}/ccr:${{ steps.prepare.outputs.IMAGE_TAG }}"
           echo "正在检查镜像: ${IMAGE_NAME}"
-          # 直接利用 docker manifest inspect 的退出码判断
           if docker manifest inspect "${IMAGE_NAME}" >/dev/null 2>&1; then
             echo "image_exists=true" >> $GITHUB_OUTPUT
             echo "镜像已存在。如需覆盖，请在运行时将 'overwrite_existing' 设为 'true'。"
@@ -79,9 +76,7 @@ jobs:
             echo "镜像不存在，将继续构建。"
           fi
 
-      # 5. 优化：将构建逻辑放在一个单独的 job 或步骤组中，并使用统一的 if 条件
-      #    这里我们为每个需要构建的步骤添加统一的 if 条件
-      #    构建条件：用户选择覆盖，或者（用户不选择覆盖 且 镜像不存在）
+      # 5. 更新 package.json
       - name: Update package.json with specific version
         id: update_package
         if: github.event.inputs.overwrite_existing || steps.check_image.outputs.image_exists == 'false'
@@ -97,10 +92,9 @@ jobs:
         if: github.event.inputs.overwrite_existing || steps.check_image.outputs.image_exists == 'false'
         uses: docker/setup-buildx-action@v3
 
-      # 6. 优化：构建和推送步骤 (移除了 determine_build 和 prep_names 步骤)
+      # 6. 构建和推送步骤
       - name: Build and push Docker image
         id: build_and_push
-        # 使用与上面相同的、更简洁的条件
         if: github.event.inputs.overwrite_existing || steps.check_image.outputs.image_exists == 'false'
         uses: docker/build-push-action@v5
         with:
@@ -111,12 +105,11 @@ jobs:
           tags: |
             ghcr.io/${{ steps.prepare.outputs.OWNER_LC }}/ccr:${{ steps.prepare.outputs.IMAGE_TAG }}
             ghcr.io/${{ steps.prepare.outputs.OWNER_LC }}/ccr:latest
-          # 优化：直接使用布尔值输入，移除了多余的 CACHE_BUST
           no-cache: ${{ github.event.inputs.skip_cache }}
 
-      # 7. 优化：使用 outcome 状态生成更可靠的摘要
+      # 7. 生成构建摘要 (已修复)
       - name: Generate build summary
-        if: always() # 确保此步骤总是运行
+        if: always()
         run: |
           echo "## 镜像构建摘要" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
@@ -124,18 +117,16 @@ jobs:
           echo "- **是否覆盖已有镜像**: `${{ github.event.inputs.overwrite_existing }}`" >> $GITHUB_STEP_SUMMARY
           echo "- **是否跳过缓存**: `${{ github.event.inputs.skip_cache }}`" >> $GITHUB_STEP_SUMMARY
           
-          # 使用 steps.build_and_push.outcome 判断构建是否被执行
-          # outcome 的值可以是 success, failure, cancelled, or skipped
           if [ "${{ steps.build_and_push.outcome }}" == "skipped" ]; then
             echo "---" >> $GITHUB_STEP_SUMMARY
             echo "🟡 **构建跳过**" >> $GITHUB_STEP_SUMMARY
-            echo "原因是镜像 `${{ jobs.build-and-push.outputs.image_tag }}` 已存在，且未选择覆盖。" >> $GITHUB_STEP_SUMMARY
+            echo "原因是镜像 `${{ steps.prepare.outputs.IMAGE_TAG }}` 已存在，且未选择覆盖。" >> $GITHUB_STEP_SUMMARY
           elif [ "${{ steps.build_and_push.outcome }}" == "success" ]; then
             echo "---" >> $GITHUB_STEP_SUMMARY
             echo "✅ **构建并推送成功**" >> $GITHUB_STEP_SUMMARY
             echo "镜像已推送到以下地址:" >> $GITHUB_STEP_SUMMARY
-            echo "  - `ghcr.io/${{ jobs.build-and-push.outputs.owner_lc }}/ccr:${{ jobs.build-and-push.outputs.image_tag }}`" >> $GITHUB_STEP_SUMMARY
-            echo "  - `ghcr.io/${{ jobs.build-and-push.outputs.owner_lc }}/ccr:latest`" >> $GITHUB_STEP_SUMMARY
+            echo "  - `ghcr.io/${{ steps.prepare.outputs.OWNER_LC }}/ccr:${{ steps.prepare.outputs.IMAGE_TAG }}`" >> $GITHUB_STEP_SUMMARY
+            echo "  - `ghcr.io/${{ steps.prepare.outputs.OWNER_LC }}/ccr:latest`" >> $GITHUB_STEP_SUMMARY
           elif [ "${{ steps.prepare.outcome }}" == "failure" ]; then
             echo "---" >> $GITHUB_STEP_SUMMARY
             echo "❌ **构建失败**" >> $GITHUB_STEP_SUMMARY
