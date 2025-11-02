@@ -76,16 +76,6 @@ jobs:
             echo "镜像不存在，将继续构建。"
           fi
 
-      # 5. 更新 package.json
-      - name: Update package.json with specific version
-        id: update_package
-        if: github.event.inputs.overwrite_existing || steps.check_image.outputs.image_exists == 'false'
-        run: |
-          NPM_VERSION="${{ steps.prepare.outputs.NPM_VERSION }}"
-          echo "正在更新 package.json，使用版本: $NPM_VERSION"
-          jq --arg version "$NPM_VERSION" '.dependencies["@musistudio/claude-code-router"] = $version' package.json > package.json.tmp && mv package.json.tmp package.json
-          echo "更新后的 package.json:"
-          cat package.json
 
       - name: Set up Docker Buildx
         id: setup_buildx
@@ -99,7 +89,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./DOCKERFILE
+          file: ./Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
