@@ -100,4 +100,19 @@ jobs:
           no-cache: ${{ github.event.inputs.skip_cache == 'true' }}
 
       #生成构建摘要 
-      - name: Build summary
+       - name: Build summary
+        if: always()
+        run: |
+          echo "## 构建摘要" >> $GITHUB_STEP_SUMMARY
+          echo "- **构建版本**: ${{ github.event.inputs.version_to_build }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **是否覆盖已有镜像**: ${{ github.event.inputs.overwrite_existing }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event.inputs.overwrite_existing }}" == "false" ]; then
+            echo "- **镜像是否已存在**: ${{ steps.check_image.outputs.image_exists || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.determine_build.outputs.should_build }}" == "true" ]; then
+            echo "✅ **构建已执行**" >> $GITHUB_STEP_SUMMARY
+            echo "- **最终镜像标签**: ${{ steps.validate_version.outputs.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **构建已跳过**" >> $GITHUB_STEP_SUMMARY
+          fi
