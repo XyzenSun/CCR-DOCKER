@@ -1,36 +1,14 @@
-# 新文件名建议: manual-build-and-push.yml
-name: Build and Push GHCR Docker Image (Manual Trigger)
-
-# 仅通过手动方式触发
-on:
-  workflow_dispatch:
-    inputs:
-      version_to_build:
-        description: '需要构建和推送的版本号 (例如: v1.0.38)'
-        required: true # 设为必填项
-      skip_cache:
-        description: '跳过所有缓存，进行全新构建'
-        required: false
-        default: 'false' # 默认不跳过缓存
-        type: boolean
-      overwrite_existing:
-        description: '如果镜像标签已存在，是否覆盖它'
-        required: false
-        default: 'false' # 默认不覆盖
-        type: boolean
-
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read   # 只需要读取仓库内容
-      packages: write  # 需要写入 GitHub Packages (GHCR)
+      contents: read
+      packages: write
     steps:
-      # 1. 检出代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. 验证用户输入的版本号格式
+      # 验证本号格式
       - name: Validate version format
         id: validate_version
         run: |
@@ -68,7 +46,7 @@ jobs:
             echo "image_exists=false" >> $GITHUB_OUTPUT
           fi
 
-      # 5. 决定是否需要执行构建
+      # 决定是否需要执行构建
       - name: Determine if build should run
         id: determine_build
         run: |
@@ -80,23 +58,31 @@ jobs:
             echo "should_build=false" >> $GITHUB_OUTPUT
           fi
 
-      # 6. 更新 package.json 中的依赖版本
+      # package.json 中的依赖版本
       - name: Update package.json with specific version
         if: steps.determine_build.outputs.should_build == 'true'
         run: |
           VERSION="${{ steps.validate_version.outputs.IMAGE_TAG }}"
-          NPM_VERSION=${VERSION#v} # 移除版本号前面的 'v'
+          NPM_VERSION=${VERSION#v}
           echo "正在更新 package.json，使用版本: $NPM_VERSION"
           jq --arg version "$NPM_VERSION" '.dependencies["@musistudio/claude-code-router"] = $version' package.json > package.json.tmp && mv package.json.tmp package.json
           echo "更新后的 package.json:"
           cat package.json
 
-      # 7. 设置 Docker Buildx
+      # 设置 Docker Buildx
       - name: Set up Docker Buildx
         if: steps.determine_build.outputs.should_build == 'true'
         uses: docker/setup-buildx-action@v3
 
-      # 8. 构建并推送 Docker 镜像
+      # 准备小写的仓库所有者名称 ✨
+      - name: Prepare lowercase owner name
+        id: prep_names
+        if: steps.determine_build.outputs.should_build == 'true'
+        run: |
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "OWNER_LC=${OWNER_LC}" >> $GITHUB_OUTPUT
+
+      # 构建并推送 Docker 镜像  修复用户名大小写问题
       - name: Build and push Docker image to GHCR
         if: steps.determine_build.outputs.should_build == 'true'
         uses: docker/build-push-action@v5
@@ -107,25 +93,11 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             CACHE_BUST=${{ github.run_number }}-${{ steps.validate_version.outputs.IMAGE_TAG }}
+          # 👇 使用新准备的小写名称
           tags: |
-            ghcr.io/${{ github.repository_owner }}/ccr:${{ steps.validate_version.outputs.IMAGE_TAG }}
-            ghcr.io/${{ github.repository_owner }}/ccr:latest
+            ghcr.io/${{ steps.prep_names.outputs.OWNER_LC }}/ccr:${{ steps.validate_version.outputs.IMAGE_TAG }}
+            ghcr.io/${{ steps.prep_names.outputs.OWNER_LC }}/ccr:latest
           no-cache: ${{ github.event.inputs.skip_cache == 'true' }}
 
-      # 9. 生成构建摘要
+      #生成构建摘要 
       - name: Build summary
-        if: always()
-        run: |
-          echo "## 构建摘要" >> $GITHUB_STEP_SUMMARY
-          echo "- **构建版本**: ${{ github.event.inputs.version_to_build }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **是否覆盖已有镜像**: ${{ github.event.inputs.overwrite_existing }}" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ github.event.inputs.overwrite_existing }}" == "false" ]; then
-            echo "- **镜像是否已存在**: ${{ steps.check_image.outputs.image_exists || 'false' }}" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.determine_build.outputs.should_build }}" == "true" ]; then
-            echo "✅ **构建已执行**" >> $GITHUB_STEP_SUMMARY
-            echo "- **最终镜像标签**: ${{ steps.validate_version.outputs.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ **构建已跳过**" >> $GITHUB_STEP_SUMMARY
-          fi
