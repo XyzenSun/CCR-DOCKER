@@ -1,0 +1,131 @@
+# 新文件名建议: manual-build-and-push.yml
+name: Build and Push GHCR Docker Image (Manual Trigger)
+
+# 仅通过手动方式触发
+on:
+  workflow_dispatch:
+    inputs:
+      version_to_build:
+        description: '需要构建和推送的版本号 (例如: v1.0.38)'
+        required: true # 设为必填项
+      skip_cache:
+        description: '跳过所有缓存，进行全新构建'
+        required: false
+        default: 'false' # 默认不跳过缓存
+        type: boolean
+      overwrite_existing:
+        description: '如果镜像标签已存在，是否覆盖它'
+        required: false
+        default: 'false' # 默认不覆盖
+        type: boolean
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read   # 只需要读取仓库内容
+      packages: write  # 需要写入 GitHub Packages (GHCR)
+    steps:
+      # 1. 检出代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. 验证用户输入的版本号格式
+      - name: Validate version format
+        id: validate_version
+        run: |
+          version="${{ github.event.inputs.version_to_build }}"
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ 无效的版本格式: $version"
+            echo "期望格式为: v1.2.3"
+            exit 1
+          fi
+          echo "✅ 版本格式有效: $version"
+          echo "IMAGE_TAG=$version" >> $GITHUB_OUTPUT
+
+      # 3. 登录到 GitHub Container Registry (GHCR)
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 4. 检查镜像是否已存在 (除非用户选择覆盖)
+      - name: Check if Docker image already exists on GHCR
+        id: check_image
+        if: github.event.inputs.overwrite_existing == 'false'
+        run: |
+          IMAGE_TAG="${{ steps.validate_version.outputs.IMAGE_TAG }}"
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          REPO="ghcr.io/${OWNER_LC}/ccr"
+          echo "正在检查镜像: ${REPO}:${IMAGE_TAG}"
+          if docker manifest inspect "${REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "镜像 ${REPO}:${IMAGE_TAG} 已存在。如需覆盖，请在运行时将 'overwrite_existing' 设为 'true'。"
+            echo "image_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "镜像 ${REPO}:${IMAGE_TAG} 不存在，将继续构建。"
+            echo "image_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      # 5. 决定是否需要执行构建
+      - name: Determine if build should run
+        id: determine_build
+        run: |
+          if [ "${{ github.event.inputs.overwrite_existing }}" == "true" ] || [ "${{ steps.check_image.outputs.image_exists }}" == "false" ]; then
+            echo "决定执行构建。"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "决定跳过构建。"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
+      # 6. 更新 package.json 中的依赖版本
+      - name: Update package.json with specific version
+        if: steps.determine_build.outputs.should_build == 'true'
+        run: |
+          VERSION="${{ steps.validate_version.outputs.IMAGE_TAG }}"
+          NPM_VERSION=${VERSION#v} # 移除版本号前面的 'v'
+          echo "正在更新 package.json，使用版本: $NPM_VERSION"
+          jq --arg version "$NPM_VERSION" '.dependencies["@musistudio/claude-code-router"] = $version' package.json > package.json.tmp && mv package.json.tmp package.json
+          echo "更新后的 package.json:"
+          cat package.json
+
+      # 7. 设置 Docker Buildx
+      - name: Set up Docker Buildx
+        if: steps.determine_build.outputs.should_build == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      # 8. 构建并推送 Docker 镜像
+      - name: Build and push Docker image to GHCR
+        if: steps.determine_build.outputs.should_build == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            CACHE_BUST=${{ github.run_number }}-${{ steps.validate_version.outputs.IMAGE_TAG }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/ccr:${{ steps.validate_version.outputs.IMAGE_TAG }}
+            ghcr.io/${{ github.repository_owner }}/ccr:latest
+          no-cache: ${{ github.event.inputs.skip_cache == 'true' }}
+
+      # 9. 生成构建摘要
+      - name: Build summary
+        if: always()
+        run: |
+          echo "## 构建摘要" >> $GITHUB_STEP_SUMMARY
+          echo "- **构建版本**: ${{ github.event.inputs.version_to_build }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **是否覆盖已有镜像**: ${{ github.event.inputs.overwrite_existing }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event.inputs.overwrite_existing }}" == "false" ]; then
+            echo "- **镜像是否已存在**: ${{ steps.check_image.outputs.image_exists || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.determine_build.outputs.should_build }}" == "true" ]; then
+            echo "✅ **构建已执行**" >> $GITHUB_STEP_SUMMARY
+            echo "- **最终镜像标签**: ${{ steps.validate_version.outputs.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **构建已跳过**" >> $GITHUB_STEP_SUMMARY
+          fi
