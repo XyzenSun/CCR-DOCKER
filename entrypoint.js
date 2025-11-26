@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 
 const { spawn } = require('child_process');
-const { existsSync, mkdirSync, readdirSync, statSync, readFileSync, createReadStream, unlinkSync } = require('fs');  // 新增unlinkSync导入
+const { existsSync, mkdirSync, readdirSync, statSync, readFileSync, createReadStream, unlinkSync, writeFileSync } = require('fs');
 const path = require('path');
 
 // --- 配置定义 ---
 const CONFIG_FILE = "/root/.claude-code-router/config.json";
 const LOGS_DIR = "/root/.claude-code-router/logs";
 const CCR_CLI_PATH = "/app/node_modules/@musistudio/claude-code-router/dist/cli.js";
-const PID_FILE = "/root/.claude-code-router/.claude-code-router.pid";  // 新增PID文件路径定义
+const PID_FILE = "/root/.claude-code-router/.claude-code-router.pid";
 
 // --- 优雅退出处理 ---
 let ccrProcess = null;
@@ -57,12 +57,46 @@ function checkEnvironment() {
         console.error(`错误：CCR CLI 文件未找到: ${CCR_CLI_PATH}`); 
         process.exit(1);
     }
+
+    // 确保配置文件的父目录存在
+    const configDir = path.dirname(CONFIG_FILE);
+    if (!existsSync(configDir)) {
+        try {
+            mkdirSync(configDir, { recursive: true });
+        } catch (err) {
+            console.error(`错误：无法创建配置目录: ${err.message}`);
+            process.exit(1);
+        }
+    }
+
     if (!existsSync(CONFIG_FILE)) {
-        console.error('---');
-        console.error('错误：配置文件未找到！');
-        console.error(`请挂载配置文件到: -v /path/to/your/config.json:${CONFIG_FILE}`);
-        console.error('---');
-        process.exit(1);
+        console.log('--> 配置文件未找到，正在生成默认配置...');
+        try {
+            const defaultConfig = {
+                "LOG": false,
+                "LOG_LEVEL": "debug",
+                "CLAUDE_PATH": "",
+                "HOST": "0.0.0.0",
+                "PORT": 3456,
+                "APIKEY": "sk-123456",
+                "API_TIMEOUT_MS": "600000",
+                "PROXY_URL": "",
+                "transformers": [
+                    {
+                        "path": "/root/.claude-code-router/plugins/qwen-cli.js"
+                    }
+                ],
+                "Providers": [],
+                "CUSTOM_ROUTER_PATH": ""
+            };
+            
+            writeFileSync(CONFIG_FILE, JSON.stringify(defaultConfig, null, 2));
+            console.log(`--> 已生成默认配置文件: ${CONFIG_FILE}`);
+            console.log(`--> 默认 APIKEY: sk-123456, 端口: 3456`);
+        } catch (err) {
+            console.error(`错误：无法生成默认配置文件: ${err.message}`);
+            process.exit(1);
+        }
     }
     try {
         mkdirSync(LOGS_DIR, { recursive: true });
